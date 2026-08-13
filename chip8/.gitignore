@@ -1,0 +1,6 @@
+# Artefatos de compilação
+build/
+build-asan/
+
+# ROMs geradas por `make roms` — reproduzíveis a partir de tools/mkroms.c
+roms/*.ch8
