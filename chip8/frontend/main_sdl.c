@@ -408,7 +408,10 @@ int main(int argc, char **argv)
 
         /* 2. Emulação de um quadro. */
         if (!paused) {
-            if (debug) {
+            if (debug && vm.pc + 1 < CHIP8_MEM_SIZE) {
+                /* A checagem de limite importa: um programa descontrolado pode
+                   deixar `pc` no último byte da memória, e aí `pc + 1` já está
+                   fora dos 4 KiB. */
                 char mnemonic[32];
                 uint16_t op =
                     (uint16_t)((vm.mem[vm.pc] << 8) | vm.mem[vm.pc + 1]);

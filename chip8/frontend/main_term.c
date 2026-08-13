@@ -54,6 +54,7 @@
 #include "chip8.h"
 
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,6 +194,45 @@ static int map_key(int c)
 /* ------------------------------------------------------------------------ */
 
 /**
+ * @brief Acrescenta texto formatado ao buffer, sem nunca ultrapassá-lo.
+ *
+ * O cuidado aqui não é decorativo: `snprintf` devolve o tamanho que *seria*
+ * necessário, não o que coube. Somar esse retorno cegamente faria `*len`
+ * passar da capacidade em caso de truncamento, e a chamada seguinte
+ * calcularia `buf + *len` (ponteiro fora do vetor) com um tamanho
+ * `cap - *len` que estouraria para um `size_t` gigante — ou seja, uma
+ * escrita fora dos limites. Aqui o comprimento é grampeado em `cap - 1`, de
+ * modo que qualquer acréscimo posterior simplesmente não faz nada.
+ *
+ * @param buf Buffer de destino.
+ * @param cap Capacidade total de `buf`.
+ * @param len Comprimento atual, atualizado no lugar.
+ * @param fmt Formato no estilo `printf`.
+ */
+static void frame_append(char *buf, size_t cap, size_t *len, const char *fmt, ...)
+{
+    va_list args;
+    int written;
+
+    if (cap == 0 || *len >= cap - 1) {
+        return;
+    }
+
+    va_start(args, fmt);
+    written = vsnprintf(buf + *len, cap - *len, fmt, args);
+    va_end(args);
+
+    if (written < 0) {
+        return;
+    }
+    if (*len + (size_t)written >= cap) {
+        *len = cap - 1; /* houve truncamento: para por aqui */
+    } else {
+        *len += (size_t)written;
+    }
+}
+
+/**
  * @brief Redesenha a tela inteira usando meio-blocos Unicode.
  *
  * Monta o quadro completo em um buffer e o envia numa única escrita, para
@@ -203,15 +243,18 @@ static int map_key(int c)
  */
 static void draw_screen(const chip8_t *vm, const char *status)
 {
-    /* Pior caso: cada pixel duplo custa um seletor de cor (~20 bytes) mais o
-       caractere de bloco (3 bytes). Dimensionado com folga. */
+    /* Cada pixel duplo custa dois seletores de cor (10 bytes) mais o
+       caractere de bloco (3 bytes), o que dá ~838 bytes por linha de texto e
+       ~13,6 KiB por quadro. O dobro disso é folga suficiente, e
+       frame_append() garante que exceder o buffer trunque em vez de corromper
+       a memória. */
     static char frame[CHIP8_SCREEN_W * (CHIP8_SCREEN_H / 2) * 32 + 512];
     size_t len = 0;
     int y;
 
     /* Volta o cursor para o canto superior esquerdo sem limpar a tela: a
        sobreposição do quadro novo é o que evita o tremor da imagem. */
-    len += (size_t)snprintf(frame + len, sizeof(frame) - len, "\033[H");
+    frame_append(frame, sizeof(frame), &len, "\033[H");
 
     for (y = 0; y < CHIP8_SCREEN_H; y += 2) {
         int x;
@@ -221,15 +264,14 @@ static void draw_screen(const chip8_t *vm, const char *status)
 
             /* `▀` acende o pixel de cima com a cor de frente e o de baixo com
                a cor de fundo — dois pixels do CHIP-8 em um caractere. */
-            len += (size_t)snprintf(
-                frame + len, sizeof(frame) - len, "\033[3%dm\033[4%dm\xe2\x96\x80",
-                top ? 7 : 0, bottom ? 7 : 0);
+            frame_append(frame, sizeof(frame), &len,
+                         "\033[3%dm\033[4%dm\xe2\x96\x80", top ? 7 : 0,
+                         bottom ? 7 : 0);
         }
-        len += (size_t)snprintf(frame + len, sizeof(frame) - len, "\033[0m\r\n");
+        frame_append(frame, sizeof(frame), &len, "\033[0m\r\n");
     }
 
-    len += (size_t)snprintf(frame + len, sizeof(frame) - len, "\033[0m\r\n%s",
-                            status);
+    frame_append(frame, sizeof(frame), &len, "\033[0m\r\n%s", status);
 
     fwrite(frame, 1, len, stdout);
     fflush(stdout);
@@ -399,8 +441,10 @@ int main(int argc, char **argv)
 
         /* 3. Emulação de um quadro. */
         if (!paused) {
-            if (debug) {
-                /* Antes de executar, mostra o que está em `pc`. */
+            if (debug && vm.pc + 1 < CHIP8_MEM_SIZE) {
+                /* Antes de executar, mostra o que está em `pc`. A checagem de
+                   limite importa: um programa descontrolado pode deixar `pc`
+                   no último byte da memória, e aí `pc + 1` já está fora. */
                 uint16_t op = (uint16_t)((vm.mem[vm.pc] << 8) | vm.mem[vm.pc + 1]);
                 chip8_disasm(op, mnemonic, sizeof(mnemonic));
                 fprintf(stderr, "%04X: %04X  %-18s I=%03X SP=%u\n", vm.pc, op,
